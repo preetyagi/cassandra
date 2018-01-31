@@ -348,6 +348,8 @@ public class Config
     public volatile boolean back_pressure_enabled = false;
     public volatile ParameterizedClass back_pressure_strategy;
 
+    public String memory_storage_mode = "disabled";
+
     /**
      * @deprecated migrate to {@link DatabaseDescriptor#isClientInitialized()}
      */
@@ -458,6 +460,12 @@ public class Config
             }
             configMap.put(name, value);
         }
+        String memoryMode = configMap.get("memory_storage_mode");
+        assert memoryMode != null : "memory storage mode is null";
+        if (memoryMode.equalsIgnoreCase("persistent_memory"))
+            logger.info("Persistent Memory Enabled!!!");
+        else if (memoryMode.equalsIgnoreCase("in_memory"))
+            logger.info("In Memory Enabled!!!");
 
         logger.info("Node configuration:[{}]", Joiner.on("; ").join(configMap.entrySet()));
     }

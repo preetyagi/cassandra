@@ -26,6 +26,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Throwables;
 
+import org.apache.cassandra.memory.MTableWriter;
+import org.apache.cassandra.memory.MHeader;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -414,6 +417,8 @@ public class Memtable implements Comparable<Memtable>
         private final PartitionPosition from;
         private final PartitionPosition to;
 
+        private MTableWriter mTableWriter;
+
         FlushRunnable(PartitionPosition from, PartitionPosition to, Directories.DataDirectory flushLocation, LifecycleTransaction txn)
         {
             this(partitions.subMap(from, to), flushLocation, from, to, txn);
@@ -448,6 +453,10 @@ public class Memtable implements Comparable<Memtable>
             else
                 writer = createFlushWriter(txn, cfs.newSSTableDescriptor(getDirectories().getLocationForDisk(flushLocation)), columnsCollector.get(), statsCollector.get());
 
+            // Initialize PMTable writer if PM is enabled
+            if(DatabaseDescriptor.isMemoryModeEnabled()) {
+                mTableWriter = MTableWriter.getInstance(new MHeader(cfs.metadata().partitionKeyType, cfs.metadata().comparator.subtypes(), columnsCollector.get()));
+            }
         }
 
         protected Directories getDirectories()
@@ -480,7 +489,11 @@ public class Memtable implements Comparable<Memtable>
                 {
                     try (UnfilteredRowIterator iter = partition.unfilteredIterator())
                     {
-                        writer.append(iter);
+                        if(DatabaseDescriptor.isMemoryModeEnabled() && mTableWriter != null) {
+                            mTableWriter.write(iter);
+                        } else {
+                            writer.append(iter);
+                        }
                     }
                 }
             }
@@ -504,7 +517,6 @@ public class Memtable implements Comparable<Memtable>
         {
             MetadataCollector sstableMetadataCollector = new MetadataCollector(cfs.metadata().comparator)
                     .commitLogIntervals(new IntervalSet<>(commitLogLowerBound.get(), commitLogUpperBound.get()));
-
             return cfs.createSSTableMultiWriter(descriptor,
                                                 toFlush.size(),
                                                 ActiveRepairService.UNREPAIRED_SSTABLE,

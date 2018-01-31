@@ -2156,7 +2156,7 @@ public class DatabaseDescriptor
     {
         conf.otc_backlog_expiration_interval_ms = intervalInMillis;
     }
- 
+
     public static int getWindowsTimerInterval()
     {
         return conf.windows_timer_interval;
@@ -2303,5 +2303,20 @@ public class DatabaseDescriptor
     public static void setIdealConsistencyLevel(ConsistencyLevel cl)
     {
         conf.ideal_consistency_level = cl;
+    }
+
+    public static boolean isPersistentMemoryEnabled()
+    {
+        return conf.memory_storage_mode.equalsIgnoreCase("persistent_memory");
+    }
+
+    public static boolean isInMemoryEnabled()
+    {
+        return conf.memory_storage_mode.equalsIgnoreCase("in_memory");
+    }
+
+    public static boolean isMemoryModeEnabled()
+    {
+        return !(conf.memory_storage_mode.equalsIgnoreCase("disabled"));
     }
 }

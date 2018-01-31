@@ -21,10 +21,19 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Comparator;
 
-import org.apache.cassandra.config.*;
-import org.apache.cassandra.db.*;
-import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.DeletionPurger;
+import org.apache.cassandra.db.LivenessInfo;
+import org.apache.cassandra.db.SerializationHeader;
+import org.apache.cassandra.db.marshal.ListType;
+import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.io.util.DataInputPlus;
+import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.memory.MDataTypes;
+import org.apache.cassandra.memory.MHeader;
+import org.apache.cassandra.memory.MSimpleCell;
+import org.apache.cassandra.memory.MUtils;
 import org.apache.cassandra.schema.ColumnMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
@@ -54,6 +63,8 @@ public abstract class Cell extends ColumnData
     };
 
     public static final Serializer serializer = new BufferCell.Serializer();
+
+    public static final PMCellWriter cellWriter = new BufferCell.PMCellWriter();
 
     protected Cell(ColumnMetadata column)
     {
@@ -145,6 +156,77 @@ public abstract class Cell extends ColumnData
     // Overrides super type to provide a more precise return type.
     public abstract Cell purge(DeletionPurger purger, int nowInSec);
 
+    public static class PMCellWriter {
+        private final static int IS_DELETED_MASK             = 0x01; // Whether the cell is a tombstone or not.
+        private final static int IS_EXPIRING_MASK            = 0x02; // Whether the cell is expiring.
+        private final static int HAS_EMPTY_VALUE_MASK        = 0x04; // Wether the cell has an empty value. This will be the case for tombstone in particular.
+        private final static int USE_ROW_TIMESTAMP_MASK      = 0x08; // Wether the cell has the same timestamp than the row this is a cell of.
+        private final static int USE_ROW_TTL_MASK            = 0x10; // Wether the cell has the same ttl than the row this is a cell of.
+
+        // Writes cell data to the memory depending on what is enabled, volatile or persistent
+        public MSimpleCell writeCelltoMemory(Cell cell, ColumnMetadata column, LivenessInfo rowLiveness, MHeader header) throws IOException
+        {
+            assert cell != null;
+            boolean hasValue = cell.value().hasRemaining();
+            boolean isDeleted = cell.isTombstone();
+            boolean isExpiring = cell.isExpiring();
+            boolean useRowTimestamp = !rowLiveness.isEmpty() && cell.timestamp() == rowLiveness.timestamp();
+            boolean useRowTTL = isExpiring && rowLiveness.isExpiring() && cell.ttl() == rowLiveness.ttl() && cell.localDeletionTime() == rowLiveness.localExpirationTime();
+            int flags = 0;
+            if (!hasValue)
+                flags |= HAS_EMPTY_VALUE_MASK;
+
+            if (isDeleted)
+                flags |= IS_DELETED_MASK;
+            else if (isExpiring)
+                flags |= IS_EXPIRING_MASK;
+
+            if (useRowTimestamp)
+                flags |= USE_ROW_TIMESTAMP_MASK;
+            if (useRowTTL)
+                flags |= USE_ROW_TTL_MASK;
+
+            byte[] cellp = null;
+            if (column.isComplex())
+            {
+                cell.path().get(0).mark();
+                cellp = new byte[cell.path().get(0).remaining()];
+                cell.path().get(0).get(cellp);
+                cell.path().get(0).reset();
+            }
+
+            MDataTypes dataTypes = null;
+            if (header.getType(column) instanceof MapType)
+            {
+                dataTypes = MUtils.getMDataType(((MapType) header.getType(column)).getValuesType());
+            }
+            else if (header.getType(column) instanceof SetType)
+            {
+                dataTypes = MUtils.getMDataType(((SetType) header.getType(column)).getElementsType());
+            }
+            else if (header.getType(column) instanceof ListType)
+            {
+                System.out.println("FIX IT!!!");
+            }
+            else
+            {
+                dataTypes = MUtils.getMDataType(header.getType(column));
+            }
+
+            byte[] val = null;
+            if (hasValue)
+            {
+                val = new byte[cell.value().remaining()];
+                cell.value().duplicate().get(val);
+            }
+            MSimpleCell mSimpleCell = MSimpleCell.getInstance(dataTypes, (byte) flags, !useRowTimestamp, cell.timestamp(),
+                                                              ((isDeleted || isExpiring) && !useRowTTL), cell.localDeletionTime(),
+                                                              (isExpiring && !useRowTTL), cell.ttl(), hasValue,
+                                                              val, column.isComplex(), cellp);
+            return mSimpleCell;
+        }
+    }
+
     /**
      * The serialization format for cell is:
      *     [ flags ][ timestamp ][ deletion time ][    ttl    ][ path size ][ path ][ value size ][ value ]
@@ -204,11 +286,13 @@ public abstract class Cell extends ColumnData
             if (isExpiring && !useRowTTL)
                 header.writeTTL(cell.ttl(), out);
 
-            if (column.isComplex())
+            if (column.isComplex()) {
                 column.cellPathSerializer().serialize(cell.path(), out);
+            }
 
-            if (hasValue)
+            if (hasValue) {
                 header.getType(column).writeValue(cell.value(), out);
+            }
         }
 
         public Cell deserialize(DataInputPlus in, LivenessInfo rowLiveness, ColumnMetadata column, SerializationHeader header, SerializationHelper helper) throws IOException

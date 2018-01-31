@@ -38,6 +38,13 @@ import com.google.common.base.*;
 import com.google.common.base.Throwables;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.*;
+
+import lib.util.persistent.PersistentString;
+import org.apache.cassandra.db.marshal.ListType;
+import org.apache.cassandra.db.marshal.MapType;
+import org.apache.cassandra.db.marshal.SetType;
+import org.apache.cassandra.memory.*;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -69,6 +76,9 @@ import org.apache.cassandra.io.sstable.SSTableMultiWriter;
 import org.apache.cassandra.io.sstable.format.*;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
+import org.apache.cassandra.memory.persistent.PMTable;
+import org.apache.cassandra.memory.persistent.PersistentColumnMetadata;
+import org.apache.cassandra.memory.persistent.PersistentTableMetadata;
 import org.apache.cassandra.metrics.TableMetrics;
 import org.apache.cassandra.metrics.TableMetrics.Sampler;
 import org.apache.cassandra.schema.*;
@@ -418,6 +428,139 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
         logger.info("Initializing {}.{}", keyspace.getName(), name);
 
+        // Persistent memory related changes
+        if(DatabaseDescriptor.isMemoryModeEnabled()) {
+            MStorageWrapper mStorageWrapper = MStorageWrapper.getInstance();
+            assert mStorageWrapper != null : "storage wrapper instance is null";
+            mStorageWrapper.createKeyspaceIfAbsent(this.keyspace.getMetadata().name);
+            MTablesManager pmTablesManager = mStorageWrapper.getMTablesManager(this.keyspace.getMetadata().name);
+            assert pmTablesManager != null : "tables mgr null for keyspace: " + this.keyspace.getMetadata().name;
+            boolean isClusteringKeyAvailable = (this.metadata().clusteringColumns().size() != 0) ? true : false;
+            MTableMetadata mTableMetadata = null;
+
+            if(DatabaseDescriptor.isPersistentMemoryEnabled())
+            {
+                mTableMetadata = MTableMetadata.getInstance(this.keyspace.getMetadata().name, name, this.metadata().id.asUUID());
+                assert mTableMetadata != null : "mTableMetadata is null";
+                UnmodifiableIterator<ColumnMetadata> iterator = this.metadata.get().partitionKeyColumns().iterator();
+                while (iterator.hasNext())
+                {
+                    ColumnMetadata colMetadata = iterator.next();
+                    MColumnMetadata columnMetadata;
+
+                    if (colMetadata.type instanceof MapType)
+                    {
+                        MDataTypes dataType = MMapType.getInstance(MUtils.getMDataType(((MapType) colMetadata.type).getKeysType()),
+                                                                   MUtils.getMDataType(((MapType) colMetadata.type).getValuesType()));
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind),
+                                                                     dataType, false);
+                    }
+                    else if (colMetadata.type instanceof SetType)
+                    {
+                        MDataTypes dataType = MSetType.getInstance(MUtils.getMDataType(((SetType) colMetadata.type).getElementsType()));
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind),
+                                                                     dataType, false);
+                    }
+                    else if (colMetadata.type instanceof ListType)
+                    {
+                        MDataTypes dataType = MListType.getInstance(MUtils.getMDataType(((ListType) colMetadata.type).getElementsType()));
+                        boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, flag);
+                    }
+                    else
+                    {
+                        MDataTypes dataType = MUtils.getMDataType(colMetadata.type);
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, false);
+                    }
+                    assert columnMetadata != null : "column metadata is null.";
+                    mTableMetadata.addPartitionKey(columnMetadata);
+                }
+
+                iterator = this.metadata.get().clusteringColumns().iterator();
+                while (iterator.hasNext())
+                {
+                    ColumnMetadata colMetadata = iterator.next();
+                    MColumnMetadata columnMetadata;
+                    if (colMetadata.type instanceof MapType)
+                    {
+                        MDataTypes dataType = MMapType.getInstance(MUtils.getMDataType(((MapType) colMetadata.type).getKeysType()),
+                                                                   MUtils.getMDataType(((MapType) colMetadata.type).getValuesType()));
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, false);
+                    }
+                    else if (colMetadata.type instanceof SetType)
+                    {
+                        MDataTypes dataType = MSetType.getInstance(MUtils.getMDataType(((SetType) colMetadata.type).getElementsType()));
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, false);
+                    }
+                    else if (colMetadata.type instanceof ListType)
+                    {
+                        MDataTypes dataType = MListType.getInstance(MUtils.getMDataType(((ListType) colMetadata.type).getElementsType()));
+                        boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, flag);
+                    }
+                    else
+                    {
+                        MDataTypes dataType = MUtils.getMDataType(colMetadata.type);
+                        columnMetadata = MColumnMetadata.getInstance(colMetadata.name.toString(),
+                                                                     MUtils.getColumnType(colMetadata.kind), dataType, false);
+                    }
+                    assert columnMetadata != null : "column metadata is null.";
+                    mTableMetadata.addClusteringKey(columnMetadata);
+                }
+
+                Iterator colIterator = this.metadata.get().regularAndStaticColumns().iterator();
+                while (colIterator.hasNext())
+                {
+                    ColumnMetadata colMetadata = (ColumnMetadata) colIterator.next();
+                    MColumnMetadata columnMetadata;
+                    PersistentString columnNameTemp = PersistentString.make(colMetadata.name.toString());
+                    if (colMetadata.type instanceof MapType)
+                    {
+                        MDataTypes dataType = MMapType.getInstance(MUtils.getMDataType(((MapType) colMetadata.type).getKeysType()),
+                                                                   MUtils.getMDataType(((MapType) colMetadata.type).getValuesType()));
+                        boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                        columnMetadata = new PersistentColumnMetadata(columnNameTemp, MUtils.getColumnType(colMetadata.kind),
+                                                                      dataType, flag);
+                    }
+                    else if (colMetadata.type instanceof SetType)
+                    {
+                        MDataTypes dataType = MSetType.getInstance(MUtils.getMDataType(((SetType) colMetadata.type).getElementsType()));
+                        boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                        columnMetadata = new PersistentColumnMetadata(columnNameTemp, MUtils.getColumnType(colMetadata.kind),
+                                                                      dataType, flag);
+                    }
+                    else if (colMetadata.type instanceof ListType)
+                    {
+                        MDataTypes dataType = MListType.getInstance(MUtils.getMDataType(((ListType) colMetadata.type).getElementsType()));
+                        boolean flag = (colMetadata.type).isMultiCell() ? true : false;
+                        columnMetadata = new PersistentColumnMetadata(columnNameTemp, MUtils.getColumnType(colMetadata.kind),
+                                                                      dataType, flag);
+                    }
+                    else
+                    {
+                        MDataTypes dataType = MUtils.getMDataType(colMetadata.type);
+                        columnMetadata = new PersistentColumnMetadata(columnNameTemp, MUtils.getColumnType(colMetadata.kind),
+                                                                      dataType, false);
+                    }
+                    assert columnMetadata != null : "column metadata is null.";
+                    ((PersistentTableMetadata)mTableMetadata).addRegularStaticColumn(columnNameTemp, columnMetadata);
+                }
+            }
+            boolean isPMTableCreated = pmTablesManager.createMTableIfAbsent(this.metadata().id.asUUID(),
+                    isClusteringKeyAvailable, mTableMetadata, metadata.get());
+            if (!isPMTableCreated) {
+                logger.info("PMTable already exists");
+            }
+        }
+        // Persistent memory changes done
+
         // Create Memtable only on online
         Memtable initialMemtable = null;
         if (DatabaseDescriptor.isDaemonInitialized())
@@ -430,6 +573,24 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             Directories.SSTableLister sstableFiles = directories.sstableLister(Directories.OnTxnErr.IGNORE).skipTemporary(true);
             Collection<SSTableReader> sstables = SSTableReader.openAll(sstableFiles.list().entrySet(), metadata);
             data.addInitialSSTables(sstables);
+        }
+
+        if(DatabaseDescriptor.isMemoryModeEnabled())
+        {
+            UUID tableId = this.metadata.id.asUUID();
+            if(MStorageWrapper.getInstance().doesKeyspaceExist(this.keyspace.getName()))
+            {
+                MStorageWrapper mStorageWrapper = MStorageWrapper.getInstance();
+                assert mStorageWrapper != null : "storage wrapper instance is null";
+                MTablesManager tablesManager = mStorageWrapper.getMTablesManager(this.keyspace.getName());
+                assert tablesManager != null : "table mgr instance is null";
+                if (tablesManager.doesMTableExist(tableId))
+                {
+                    //load pmtable list here
+                    MTable mTable = tablesManager.getMTable(tableId);
+                    data.addMTable(mTable);
+                }
+            }
         }
 
         /**
@@ -2654,5 +2815,24 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             return null;
 
         return keyspace.getColumnFamilyStore(table.id);
+    }
+
+    //This for now returns entire table, need to make it fine grained later
+    public static class MTableViewFragment
+    {
+        public final Iterable<Memtable> memtables;
+        public  MTable mtable;
+
+        public MTableViewFragment(Iterable<Memtable> memtables,MTable mTable)
+        {
+            this.memtables = memtables;
+            this.mtable = mTable;
+        }
+    }
+
+    public MTableViewFragment selectMTable(Function<View, MTable> filter)
+    {
+        View view = data.getView();
+        return new MTableViewFragment( view.getAllMemtables(), view.mTable);
     }
 }

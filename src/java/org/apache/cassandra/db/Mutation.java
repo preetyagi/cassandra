@@ -36,6 +36,9 @@ import org.apache.cassandra.schema.Schema;
 import org.apache.cassandra.schema.TableId;
 import org.apache.cassandra.schema.TableMetadata;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.db.rows.UnfilteredRowIterator;
+import org.apache.cassandra.memory.MHeader;
+import org.apache.cassandra.memory.MTableWriter;
 
 // TODO convert this to a Builder pattern instead of encouraging M.add directly,
 // which is less-efficient since we have to keep a mutable HashMap around
@@ -377,8 +380,31 @@ public class Mutation implements IMutation
 
             assert size > 0;
             for (Map.Entry<TableId, PartitionUpdate> entry : mutation.modifications.entrySet())
+            {
                 PartitionUpdate.serializer.serialize(entry.getValue(), out, version);
+                if(DatabaseDescriptor.isMemoryModeEnabled())
+                {
+                    writeToMemory(entry.getValue());
+                }
+            }
         }
+
+        private void writeToMemory(PartitionUpdate update)
+        {
+            try (UnfilteredRowIterator iterator = update.unfilteredIterator())
+            {
+                SerializationHeader header = new SerializationHeader(false,
+                                                                     iterator.metadata(),
+                                                                     iterator.columns(),
+                                                                     iterator.stats());
+
+                MTableWriter mTableWriter = MTableWriter.getInstance(new MHeader(header.keyType(),
+                                                                                  header.clusteringTypes(),
+                                                                                  header.columns()));
+                assert mTableWriter != null : "mTableWriter is null";
+                mTableWriter.write(iterator);
+            }
+         }
 
         public Mutation deserialize(DataInputPlus in, int version, SerializationHelper.Flag flag) throws IOException
         {

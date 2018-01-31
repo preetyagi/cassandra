@@ -115,6 +115,8 @@
 
     <property name="ecj.version" value="4.4.2"/>
 
+    <property name="persistent-jar-name" value="persistent.jar"/>
+
     <condition property="maven-ant-tasks.jar.exists">
       <available file="${build.dir}/maven-ant-tasks-${maven-ant-tasks.version}.jar" />
     </condition>
@@ -127,6 +129,9 @@
       <available file="${build.src.java}" type="dir" />
     </condition>
 
+    <condition property="is.memstorage.artifact">
+        <available file="${build.lib}/${persistent-jar-name}" type="file" />
+    </condition>
     <tstamp>
       <format property="YEAR" pattern="yyyy"/>
     </tstamp>
@@ -730,6 +735,8 @@
 
     <target depends="init,gen-cql3-grammar,generate-cql-html,generate-jflex-java"
             name="build-project">
+        <fail unless="is.memstorage.artifact"
+              message="Persistent Jar not available. Please download code from https://github.com/pmem/pcj and build. For more details see README, stopping here." />
         <echo message="${ant.project.name}: ${ant.file}"/>
         <!-- Order matters! -->
         <javac fork="true"

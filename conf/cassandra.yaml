@@ -1098,6 +1098,12 @@ back_pressure_strategy:
           factor: 5
           flow: FAST
 
+# Config for storage mode, by default is will be persistent_memory
+# "persistent_memory" : for persistent memory mode
+# "in_memory" : for in memory mode (no data will be persistent)
+# if commented out or set to "disabled", default disk-based existing behavior will be functional
+# memory_storage_mode: persistent_memory
+
 # Coalescing Strategies #
 # Coalescing multiples messages turns out to significantly boost message processing throughput (think doubling or more).
 # On bare metal, the floor for packet processing throughput is high enough that many applications won't notice, but in
